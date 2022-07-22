@@ -24,6 +24,7 @@ func compileShader(source string, shaderType uint32) (uint32, error) {
 
 	var status int32
 	gl.GetShaderiv(shader, gl.COMPILE_STATUS, &status)
+
 	if status == gl.FALSE {
 		var logLength int32
 		gl.GetShaderiv(shader, gl.INFO_LOG_LENGTH, &logLength)
@@ -33,7 +34,6 @@ func compileShader(source string, shaderType uint32) (uint32, error) {
 
 		return 0, fmt.Errorf("failed to compile %v: %v", source, log)
 	}
-
 	return shader, nil
 }
 
@@ -42,11 +42,13 @@ func newProgram(vertexShaderSource, fragmentShaderSource string) (uint32, error)
 	if err != nil {
 		return 0, err
 	}
+	infoLogger.Println("Successfully compiled vertex shader")
 
 	fragmentShader, err := compileShader(fragmentShaderSource, gl.FRAGMENT_SHADER)
 	if err != nil {
 		return 0, err
 	}
+	infoLogger.Println("Successfully compiled vertex shader")
 
 	program := gl.CreateProgram()
 
@@ -56,6 +58,9 @@ func newProgram(vertexShaderSource, fragmentShaderSource string) (uint32, error)
 
 	var status int32
 	gl.GetProgramiv(program, gl.LINK_STATUS, &status)
+
+	defer gl.DeleteShader(vertexShader)
+	defer gl.DeleteShader(fragmentShader)
 	if status == gl.FALSE {
 		var logLength int32
 		gl.GetProgramiv(program, gl.INFO_LOG_LENGTH, &logLength)
@@ -66,8 +71,7 @@ func newProgram(vertexShaderSource, fragmentShaderSource string) (uint32, error)
 		return 0, fmt.Errorf("failed to link program: %v", log)
 	}
 
-	gl.DeleteShader(vertexShader)
-	gl.DeleteShader(fragmentShader)
+	infoLogger.Println("Successfully linked shader program")
 
 	return program, nil
 }
@@ -79,8 +83,13 @@ var uniscale float32 = 0.3
 var yrot float32 = 20.0
 var zrot float32 = 0.0
 var xrot float32 = 0.0
-var UniScale int32
+var UniScale int32 = 0
 
+var infoLogger *log.Logger = nil
+var warnLogger *log.Logger = nil
+var criticalLogger *log.Logger = nil
+
+// multi-threading https://vilimpoc.org/research/portmonitorg/sdl-tips-and-tricks.html
 func main() {
 	var window *sdl.Window
 	var context sdl.GLContext
@@ -88,15 +97,15 @@ func main() {
 	var running bool
 	var err error
 
-	infoLogger := log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
-	//warnLogger := log.New(os.Stdout, "WARNING: ", log.Ldate|log.Ltime|log.Lshortfile)
-	criticalLogger := log.New(os.Stdout, "CRITICAL: ", log.Ldate|log.Ltime|log.Lshortfile)
+	infoLogger = log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
+	warnLogger = log.New(os.Stdout, "WARNING: ", log.Ldate|log.Ltime|log.Lshortfile)
+	criticalLogger = log.New(os.Stdout, "CRITICAL: ", log.Ldate|log.Ltime|log.Lshortfile)
 
 	// event handling must run on the main OS thread
 	runtime.LockOSThread()
 
 	if err = sdl.Init(sdl.INIT_EVERYTHING); err != nil {
-		panic(err)
+		criticalLogger.Fatalln(err)
 	}
 	defer sdl.Quit()
 
@@ -104,8 +113,7 @@ func main() {
 		sdl.WINDOWPOS_UNDEFINED,
 		winWidth, winHeight, sdl.WINDOW_OPENGL)
 	if err != nil {
-		criticalLogger.Println(err)
-		panic(err)
+		criticalLogger.Fatalln(err)
 	}
 	defer window.Destroy()
 
@@ -119,13 +127,13 @@ func main() {
 
 	context, err = window.GLCreateContext()
 	if err != nil {
-		panic(err)
+		criticalLogger.Fatalln(err)
 	}
 	defer sdl.GLDeleteContext(context)
 
 	// Initialize Glow
 	if err := gl.Init(); err != nil {
-		panic(err)
+		criticalLogger.Fatalln(err)
 	}
 
 	version := gl.GoStr(gl.GetString(gl.VERSION))
@@ -134,7 +142,7 @@ func main() {
 	// Configure the vertex and fragment shaders
 	program, err := newProgram(vertexShaderSource, fragmentShaderSource)
 	if err != nil {
-		panic(err)
+		criticalLogger.Fatalln(err)
 	}
 
 	gl.UseProgram(program)
@@ -151,7 +159,6 @@ func main() {
 	//UNIFORM HOOK
 	unistring := gl.Str("scaleMove\x00")
 	UniScale = gl.GetUniformLocation(program, unistring)
-	fmt.Printf("Uniform Link: %v\n", UniScale+1)
 
 	// Configure the vertex data
 	var vao uint32
@@ -180,7 +187,7 @@ func main() {
 			case *sdl.MouseMotionEvent:
 				xrot = float32(t.Y) / 2
 				yrot = float32(t.X) / 2
-				fmt.Printf("[%dms]MouseMotion\tid:%d\tx:%d\ty:%d\txrel:%d\tyrel:%d\n", t.Timestamp, t.Which, t.X, t.Y, t.XRel, t.YRel)
+				infoLogger.Printf("[%dms]MouseMotion\tid:%d\tx:%d\ty:%d\txrel:%d\tyrel:%d\n", t.Timestamp, t.Which, t.X, t.Y, t.XRel, t.YRel)
 			case *sdl.JoyDeviceAddedEvent:
 				enumerateGamepad()
 			}
@@ -231,25 +238,22 @@ const (
 	out vec3 fragmentColor;
 	void main()
 	{ 
-	// YOU CAN OPTIMISE OUT cos(scaleMove.x) AND sin(scaleMove.y) AND UNIFORM THE VALUES IN
 		vec3 scale = Position.xyz * scaleMove.w;
-	// rotate on z pole
-	vec3 rotatez = vec3((scale.x * cos(scaleMove.x) - scale.y * sin(scaleMove.x)), (scale.x * sin(scaleMove.x) + scale.y * cos(scaleMove.x)), scale.z);
-	// rotate on y pole
+
+		vec3 rotatez = vec3((scale.x * cos(scaleMove.x) - scale.y * sin(scaleMove.x)), (scale.x * sin(scaleMove.x) + scale.y * cos(scaleMove.x)), scale.z);
 		vec3 rotatey = vec3((rotatez.x * cos(scaleMove.y) - rotatez.z * sin(scaleMove.y)), rotatez.y, (rotatez.x * sin(scaleMove.y) + rotatez.z * cos(scaleMove.y)));
-	// rotate on x pole
 		vec3 rotatex = vec3(rotatey.x, (rotatey.y * cos(scaleMove.z) - rotatey.z * sin(scaleMove.z)), (rotatey.y * sin(scaleMove.z) + rotatey.z * cos(scaleMove.z)));
-	// move
-	vec3 move = vec3(rotatex.xy, rotatex.z - 0.2);
-	// terrible perspective transform
-	vec3 persp = vec3( move.x  / ( (move.z + 2) / 3 ) ,
+
+		vec3 move = vec3(rotatex.xy, rotatex.z - 0.2);
+
+		vec3 persp = vec3( move.x  / ( (move.z + 2) / 3 ) ,
 			move.y  / ( (move.z + 2) / 3 ) ,
 				move.z);
 
 		gl_Position = vec4(persp, 1.0);
 		fragmentColor = vertexColor;
 	}
-	`
+	` + "\x00"
 
 	fragmentShaderSource = `
 	#version 330
@@ -259,7 +263,7 @@ const (
 	{
 		outColor = vec4(fragmentColor, 1.0);
 	}
-	`
+	` + "\x00"
 )
 
 var cubeVertices = []float32{
